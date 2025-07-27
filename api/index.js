@@ -1,10 +1,8 @@
-// /api/index.js (FINAL dengan Perbaikan CORS di dalam kode)
+// /api/index.js (FINAL dengan Perbaikan CORS & Pre-flight Request)
 
-// Kita impor modul yang dibutuhkan
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// Definisikan URL dasar dan header untuk scraping
 const BASE = 'https://komikcast.li';
 const axiosOptions = {
   headers: {
@@ -16,18 +14,22 @@ const axiosOptions = {
 // =============================================================
 // === FUNGSI UTAMA SCRAPER (semua logika ada di sini) ===
 // =============================================================
-async function scraperHandler(req, res) {
-  // Ambil parameter dari URL, contoh: ?type=latest&endpoint=nama-komik
-  const { type, endpoint, page = 1 } = req.query;
-
-  // =======================================================
-  // === BAGIAN PENTING: TAMBAHKAN HEADER CORS DI SINI ===
-  // =======================================================
+module.exports = async (req, res) => {
+  // ======================================================================
+  // === BAGIAN PENTING: TAMBAHKAN HEADER CORS & TANGANI OPTIONS REQUEST ===
+  // ======================================================================
   // Ini adalah "surat izin" yang kita berikan ke browser
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  // =======================================================
+
+  // Jika browser "ketuk pintu" (OPTIONS request), kita jawab "OK" lalu selesai.
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  // ======================================================================
+
+  const { type, endpoint, page = 1 } = req.query;
 
   try {
     // --- Rute untuk daftar komik terbaru ---
@@ -94,7 +96,4 @@ async function scraperHandler(req, res) {
     console.error(err); // Cetak error di log Vercel untuk debugging
     res.status(500).json({ error: 'Terjadi kesalahan pada server scraper.', message: err.message });
   }
-}
-
-// Ekspor fungsi utama agar Vercel bisa menjalankannya
-module.exports = scraperHandler;
+};
