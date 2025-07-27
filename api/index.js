@@ -73,79 +73,57 @@ module.exports = async (req, res) => {
       return res.status(200).json({ images });
     }
 
-    // --- Fitur search ---
-    if (type === 'search' && query) {
-      const url = `${BASE}/?s=${encodeURIComponent(query)}`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const results = [];
+// … sebelumnya tetap sama
+if (type === 'search' && Q) {
+  const { data } = await axios.get(`${BASE}/?s=${encodeURIComponent(Q)}`);
+  const $ = cheerio.load(data);
+  const results = [];
+  $('.listupd .utao').each((i, el) => {
+    const title = $(el).find('.luf a h3').text().trim();
+    const slug = $(el).find('.imgu a').attr('href')?.split('/')[4];
+    const cover = $(el).find('.imgu a img').attr('data-src');
+    const chapter = $(el).find('.luf ul li:first-child a').text().trim();
+    if (title && slug) results.push({ title, chapter, cover, endpoint: slug });
+  });
+  return res.json({ results });
+}
 
-      $('div.listupd .utao').each((i, el) => {
-        const title = $(el).find('.luf a h3').text().trim();
-        const fullUrl = $(el).find('.imgu a').attr('href');
-        const cover = $(el).find('.imgu a img').attr('data-src');
-        const chapter = $(el).find('.luf ul li:first-child a').text().trim();
-        const slug = fullUrl?.split('/')[4];
-        if (title && slug) results.push({ title, chapter, cover, endpoint: slug });
-      });
-      return res.status(200).json({ results });
-    }
+if (type === 'recommend') {
+  const { data } = await axios.get(BASE);
+  const $ = cheerio.load(data);
+  const recommendations = [];
+  $('.listupd .utao').slice(0, 5).each((i, el) => {
+    const title = $(el).find('.luf a h3').text().trim();
+    const slug = $(el).find('.imgu a').attr('href')?.split('/')[4];
+    const cover = $(el).find('.imgu a img').attr('data-src');
+    const chapter = $(el).find('.luf ul li:first-child a').text().trim();
+    if (title && slug) recommendations.push({ title, chapter, cover, endpoint: slug });
+  });
+  return res.json({ recommendations });
+}
 
-    // --- Komik rekomendasi (section rekomendasi homepage) ---
-    if (type === 'recommend') {
-      const { data } = await axios.get(BASE, axiosOptions);
-      const $ = cheerio.load(data);
-      const recommendations = [];
+if (type === 'popular') {
+  const { data } = await axios.get(BASE);
+  const $ = cheerio.load(data);
+  const popular = [];
+  $('#slider .item').each((i, el) => {
+    const title = $(el).find('img').attr('alt');
+    const slug = $(el).find('a').attr('href')?.split('/')[4];
+    const cover = $(el).find('img').attr('src');
+    if (title && slug) popular.push({ title, cover, endpoint: slug });
+  });
+  return res.json({ popular });
+}
 
-      $('.bixbox.bbn .listupd .utao').each((i, el) => {
-        const title = $(el).find('.luf a h3').text().trim();
-        const fullUrl = $(el).find('.imgu a').attr('href');
-        const cover = $(el).find('.imgu a img').attr('data-src');
-        const chapter = $(el).find('.luf ul li:first-child a').text().trim();
-        const slug = fullUrl?.split('/')[4];
-        if (title && slug) recommendations.push({ title, chapter, cover, endpoint: slug });
-      });
-
-      return res.status(200).json({ recommendations });
-    }
-
-    // --- Komik populer (sidebar populer homepage) ---
-    if (type === 'popular') {
-      const { data } = await axios.get(BASE, axiosOptions);
-      const $ = cheerio.load(data);
-      const popular = [];
-
-      $('div.widget-series .series').each((i, el) => {
-        const title = $(el).find('h5 a').text().trim();
-        const fullUrl = $(el).find('h5 a').attr('href');
-        const cover = $(el).find('.series-thumb img').attr('src');
-        const slug = fullUrl?.split('/')[4];
-        if (title && slug) popular.push({ title, cover, endpoint: slug });
-      });
-
-      return res.status(200).json({ popular });
-    }
-
-    // --- List genre ---
-    if (type === 'genre') {
-      const { data } = await axios.get(BASE, axiosOptions);
-      const $ = cheerio.load(data);
-      const genres = [];
-
-      $('#genre option').each((i, el) => {
-        const name = $(el).text().trim();
-        const value = $(el).attr('value');
-        if (value && name) genres.push({ name, endpoint: value });
-      });
-
-      return res.status(200).json({ genres });
-    }
-
-    // --- Kalau parameter gak jelas ---
-    return res.status(400).json({ error: 'Parameter "type" tidak valid atau parameter kurang lengkap.' });
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Terjadi kesalahan pada server scraper.', message: err.message });
-  }
-};
+if (type === 'genre') {
+  const { data } = await axios.get(`${BASE}/genres/`);
+  const $ = cheerio.load(data);
+  const genres = [];
+  $('.genrez li a').each((i, el) => {
+    const name = $(el).text().trim();
+    const href = $(el).attr('href');
+    const slug = href?.split('/genres/')[1]?.split('/')[0];
+    if (name && slug) genres.push({ name, slug });
+  });
+  return res.json({ genres });
+}
