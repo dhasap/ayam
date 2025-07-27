@@ -1,4 +1,4 @@
-// /api/index.js (FINAL dengan Fitur Search)
+// /api/index.js (FINAL dengan Perbaikan CORS, Pre-flight Request & Fitur Tambahan)
 
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -12,20 +12,15 @@ const axiosOptions = {
 };
 
 module.exports = async (req, res) => {
-  // Handle CORS & Pre-flight Request
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
 
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-  
-  // Ambil query parameter dari URL
-  const { type, endpoint, page = 1, q } = req.query;
+  const { type, endpoint, query, page = 1 } = req.query;
 
   try {
-    // --- Rute untuk daftar komik terbaru ---
+    // --- Daftar komik terbaru ---
     if (type === 'latest') {
       const url = `${BASE}/?page=${page}`;
       const { data } = await axios.get(url, axiosOptions);
@@ -38,39 +33,12 @@ module.exports = async (req, res) => {
         const cover = $(el).find('.imgu a img').attr('data-src');
         const chapter = $(el).find('.luf ul li:first-child a').text().trim();
         const slug = fullUrl?.split('/')[4];
-
-        if (title && slug) {
-          comics.push({ title, chapter, cover, endpoint: slug });
-        }
+        if (title && slug) comics.push({ title, chapter, cover, endpoint: slug });
       });
       return res.status(200).json({ comics });
     }
 
-    // =============================================================
-    // === ✨ LOGIKA BARU UNTUK FITUR PENCARIAN (`type=search`) ✨ ===
-    // =============================================================
-    if (type === 'search' && q) {
-      const url = `${BASE}/?s=${encodeURIComponent(q)}`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const results = [];
-
-      $('div.list-update_item').each((i, el) => {
-        const title = $(el).find('h3.title a').text().trim();
-        const fullUrl = $(el).find('a').attr('href');
-        const cover = $(el).find('a img').attr('src');
-        const type = $(el).find('.type').text().trim(); // e.g., Manhwa, Manga
-        const slug = fullUrl?.split('/')[4];
-
-        if (title && slug) {
-            results.push({ title, cover, type, endpoint: slug });
-        }
-      });
-      return res.status(200).json({ results });
-    }
-    // =============================================================
-
-    // --- Rute untuk detail komik ---
+    // --- Detail komik ---
     if (type === 'detail' && endpoint) {
       const url = `${BASE}/komik/${endpoint}/`;
       const { data } = await axios.get(url, axiosOptions);
@@ -85,14 +53,13 @@ module.exports = async (req, res) => {
         const chapterTitle = $(el).find('a').text().trim();
         const chapterUrl = $(el).find('a').attr('href');
         const slug = chapterUrl?.split('/').filter(x => x).pop();
-        if (chapterTitle && slug) {
-            chapters.push({ chapterTitle, chapterEndpoint: slug });
-        }
+        if (chapterTitle && slug) chapters.push({ chapterTitle, chapterEndpoint: slug });
       });
+
       return res.status(200).json({ title, cover, synopsis, chapters: chapters.reverse() });
     }
 
-    // --- Rute untuk gambar chapter ---
+    // --- Gambar chapter ---
     if (type === 'chapter' && endpoint) {
       const url = `${BASE}/chapter/${endpoint}/`;
       const { data } = await axios.get(url, axiosOptions);
@@ -106,11 +73,79 @@ module.exports = async (req, res) => {
       return res.status(200).json({ images });
     }
 
-    // Jika parameter tidak valid
-    res.status(400).json({ error: "Parameter tidak valid. Pastikan 'type' diisi dan 'endpoint' atau 'q' tersedia jika diperlukan." });
+    // --- Fitur search ---
+    if (type === 'search' && query) {
+      const url = `${BASE}/?s=${encodeURIComponent(query)}`;
+      const { data } = await axios.get(url, axiosOptions);
+      const $ = cheerio.load(data);
+      const results = [];
+
+      $('div.listupd .utao').each((i, el) => {
+        const title = $(el).find('.luf a h3').text().trim();
+        const fullUrl = $(el).find('.imgu a').attr('href');
+        const cover = $(el).find('.imgu a img').attr('data-src');
+        const chapter = $(el).find('.luf ul li:first-child a').text().trim();
+        const slug = fullUrl?.split('/')[4];
+        if (title && slug) results.push({ title, chapter, cover, endpoint: slug });
+      });
+      return res.status(200).json({ results });
+    }
+
+    // --- Komik rekomendasi (section rekomendasi homepage) ---
+    if (type === 'recommend') {
+      const { data } = await axios.get(BASE, axiosOptions);
+      const $ = cheerio.load(data);
+      const recommendations = [];
+
+      $('.bixbox.bbn .listupd .utao').each((i, el) => {
+        const title = $(el).find('.luf a h3').text().trim();
+        const fullUrl = $(el).find('.imgu a').attr('href');
+        const cover = $(el).find('.imgu a img').attr('data-src');
+        const chapter = $(el).find('.luf ul li:first-child a').text().trim();
+        const slug = fullUrl?.split('/')[4];
+        if (title && slug) recommendations.push({ title, chapter, cover, endpoint: slug });
+      });
+
+      return res.status(200).json({ recommendations });
+    }
+
+    // --- Komik populer (sidebar populer homepage) ---
+    if (type === 'popular') {
+      const { data } = await axios.get(BASE, axiosOptions);
+      const $ = cheerio.load(data);
+      const popular = [];
+
+      $('div.widget-series .series').each((i, el) => {
+        const title = $(el).find('h5 a').text().trim();
+        const fullUrl = $(el).find('h5 a').attr('href');
+        const cover = $(el).find('.series-thumb img').attr('src');
+        const slug = fullUrl?.split('/')[4];
+        if (title && slug) popular.push({ title, cover, endpoint: slug });
+      });
+
+      return res.status(200).json({ popular });
+    }
+
+    // --- List genre ---
+    if (type === 'genre') {
+      const { data } = await axios.get(BASE, axiosOptions);
+      const $ = cheerio.load(data);
+      const genres = [];
+
+      $('#genre option').each((i, el) => {
+        const name = $(el).text().trim();
+        const value = $(el).attr('value');
+        if (value && name) genres.push({ name, endpoint: value });
+      });
+
+      return res.status(200).json({ genres });
+    }
+
+    // --- Kalau parameter gak jelas ---
+    return res.status(400).json({ error: 'Parameter "type" tidak valid atau parameter kurang lengkap.' });
 
   } catch (err) {
-    console.error(err); // Cetak error di log Vercel untuk debugging
-    res.status(500).json({ error: 'Terjadi kesalahan pada server scraper.', message: err.message });
+    console.error(err);
+    return res.status(500).json({ error: 'Terjadi kesalahan pada server scraper.', message: err.message });
   }
 };
