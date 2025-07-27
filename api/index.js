@@ -1,4 +1,4 @@
-// /api/index.js (FINAL dengan Perbaikan CORS & Pre-flight Request)
+// /api/index.js (FINAL dengan Fitur Search)
 
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -11,25 +11,18 @@ const axiosOptions = {
   }
 };
 
-// =============================================================
-// === FUNGSI UTAMA SCRAPER (semua logika ada di sini) ===
-// =============================================================
 module.exports = async (req, res) => {
-  // ======================================================================
-  // === BAGIAN PENTING: TAMBAHKAN HEADER CORS & TANGANI OPTIONS REQUEST ===
-  // ======================================================================
-  // Ini adalah "surat izin" yang kita berikan ke browser
+  // Handle CORS & Pre-flight Request
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Jika browser "ketuk pintu" (OPTIONS request), kita jawab "OK" lalu selesai.
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
-  // ======================================================================
-
-  const { type, endpoint, page = 1 } = req.query;
+  
+  // Ambil query parameter dari URL
+  const { type, endpoint, page = 1, q } = req.query;
 
   try {
     // --- Rute untuk daftar komik terbaru ---
@@ -52,6 +45,30 @@ module.exports = async (req, res) => {
       });
       return res.status(200).json({ comics });
     }
+
+    // =============================================================
+    // === ✨ LOGIKA BARU UNTUK FITUR PENCARIAN (`type=search`) ✨ ===
+    // =============================================================
+    if (type === 'search' && q) {
+      const url = `${BASE}/?s=${encodeURIComponent(q)}`;
+      const { data } = await axios.get(url, axiosOptions);
+      const $ = cheerio.load(data);
+      const results = [];
+
+      $('div.list-update_item').each((i, el) => {
+        const title = $(el).find('h3.title a').text().trim();
+        const fullUrl = $(el).find('a').attr('href');
+        const cover = $(el).find('a img').attr('src');
+        const type = $(el).find('.type').text().trim(); // e.g., Manhwa, Manga
+        const slug = fullUrl?.split('/')[4];
+
+        if (title && slug) {
+            results.push({ title, cover, type, endpoint: slug });
+        }
+      });
+      return res.status(200).json({ results });
+    }
+    // =============================================================
 
     // --- Rute untuk detail komik ---
     if (type === 'detail' && endpoint) {
@@ -90,7 +107,7 @@ module.exports = async (req, res) => {
     }
 
     // Jika parameter tidak valid
-    res.status(400).json({ error: 'Parameter "type" tidak valid atau "endpoint" tidak ada.' });
+    res.status(400).json({ error: "Parameter tidak valid. Pastikan 'type' diisi dan 'endpoint' atau 'q' tersedia jika diperlukan." });
 
   } catch (err) {
     console.error(err); // Cetak error di log Vercel untuk debugging
