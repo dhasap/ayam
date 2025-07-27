@@ -1,18 +1,36 @@
+// /api/index.js (FINAL dengan Perbaikan CORS di dalam kode)
+
+// Kita impor modul yang dibutuhkan
 const axios = require('axios');
 const cheerio = require('cheerio');
 
+// Definisikan URL dasar dan header untuk scraping
 const BASE = 'https://komikcast.li';
 const axiosOptions = {
   headers: {
-    'User-Agent': 'Mozilla/5.0',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
     'Referer': BASE + '/'
   }
 };
 
-module.exports = async (req, res) => {
+// =============================================================
+// === FUNGSI UTAMA SCRAPER (semua logika ada di sini) ===
+// =============================================================
+async function scraperHandler(req, res) {
+  // Ambil parameter dari URL, contoh: ?type=latest&endpoint=nama-komik
   const { type, endpoint, page = 1 } = req.query;
 
+  // =======================================================
+  // === BAGIAN PENTING: TAMBAHKAN HEADER CORS DI SINI ===
+  // =======================================================
+  // Ini adalah "surat izin" yang kita berikan ke browser
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // =======================================================
+
   try {
+    // --- Rute untuk daftar komik terbaru ---
     if (type === 'latest') {
       const url = `${BASE}/?page=${page}`;
       const { data } = await axios.get(url, axiosOptions);
@@ -30,10 +48,10 @@ module.exports = async (req, res) => {
           comics.push({ title, chapter, cover, endpoint: slug });
         }
       });
-
       return res.status(200).json({ comics });
     }
 
+    // --- Rute untuk detail komik ---
     if (type === 'detail' && endpoint) {
       const url = `${BASE}/komik/${endpoint}/`;
       const { data } = await axios.get(url, axiosOptions);
@@ -48,12 +66,14 @@ module.exports = async (req, res) => {
         const chapterTitle = $(el).find('a').text().trim();
         const chapterUrl = $(el).find('a').attr('href');
         const slug = chapterUrl?.split('/').filter(x => x).pop();
-        chapters.push({ chapterTitle, chapterEndpoint: slug });
+        if (chapterTitle && slug) {
+            chapters.push({ chapterTitle, chapterEndpoint: slug });
+        }
       });
-
       return res.status(200).json({ title, cover, synopsis, chapters: chapters.reverse() });
     }
 
+    // --- Rute untuk gambar chapter ---
     if (type === 'chapter' && endpoint) {
       const url = `${BASE}/chapter/${endpoint}/`;
       const { data } = await axios.get(url, axiosOptions);
@@ -62,14 +82,19 @@ module.exports = async (req, res) => {
 
       $('.main-reading-area img').each((i, el) => {
         const src = $(el).attr('src');
-        if (src) images.push(src);
+        if (src) images.push(src.trim());
       });
-
       return res.status(200).json({ images });
     }
 
-    res.status(400).json({ error: 'Invalid type or missing endpoint.' });
+    // Jika parameter tidak valid
+    res.status(400).json({ error: 'Parameter "type" tidak valid atau "endpoint" tidak ada.' });
+
   } catch (err) {
-    res.status(500).json({ error: 'Something went wrong.', message: err.message });
+    console.error(err); // Cetak error di log Vercel untuk debugging
+    res.status(500).json({ error: 'Terjadi kesalahan pada server scraper.', message: err.message });
   }
-};
+}
+
+// Ekspor fungsi utama agar Vercel bisa menjalankannya
+module.exports = scraperHandler;
