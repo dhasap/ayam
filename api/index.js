@@ -1,44 +1,89 @@
+const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const rateLimit = require('express-rate-limit');
+const NodeCache = require('node-cache');
+const winston = require('winston');
+const cors = require('cors');
+const helmet = require('helmet');
 
-// Cache sederhana untuk Vercel Free (in-memory)
-const cache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 menit untuk free tier
-
-// Axios configuration optimized for mobile
-const axiosOptions = {
-  headers: {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
-    'Referer': 'https://komikcast.li/'
-  },
-  timeout: 25000 // Reduced for Vercel Free
-};
-
+const app = express();
+const PORT = process.env.PORT || 3000;
 const KOMIKCAST_URL = 'https://komikcast.li';
 
-// Simple cache functions
-const getCached = (key) => {
-  const item = cache.get(key);
-  if (item && Date.now() - item.timestamp < CACHE_TTL) {
-    return item.data;
-  }
-  cache.delete(key);
-  return null;
+// Initialize cache (TTL: 10 minutes)
+const cache = new NodeCache({ stdTTL: 600 });
+
+// Configure Winston Logger
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { service: 'komikcast-scraper' },
+  transports: [
+    new winston.transports.Console({
+      format: winston.format.simple()
+    })
+  ]
+});
+
+// Rate limiting configuration
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    error: 'Terlalu banyak request dari IP ini, coba lagi setelah 15 menit.',
+    retryAfter: '15 minutes'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Axios configuration
+const axiosOptions = {
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+    'Referer': 'https://komikcast.li/'
+  },
+  timeout: 30000
 };
 
-const setCache = (key, data) => {
-  cache.set(key, { data, timestamp: Date.now() });
-  return data;
-};
+// Middleware
+app.use(helmet());
+app.use(cors({
+  origin: '*',
+  methods: ['GET'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(limiter);
+app.use(express.json());
 
-// Error handler optimized for mobile
-const handleError = (error, res, operation) => {
-  console.error(`Error in ${operation}:`, error.message);
+// Request logging middleware
+app.use((req, res, next) => {
+  logger.info(`${req.method} ${req.path}`, {
+    ip: req.ip,
+    userAgent: req.get('User-Agent'),
+    query: req.query
+  });
+  next();
+});
+
+// Error handling middleware
+const handleError = (error, req, res, operation) => {
+  logger.error(`Error in ${operation}`, {
+    error: error.message,
+    stack: error.stack,
+    url: req.url,
+    ip: req.ip
+  });
   
   if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
     return res.status(503).json({
       success: false,
-      message: 'Layanan tidak tersedia. Coba lagi nanti.',
+      message: 'Layanan sementara tidak tersedia. Silakan coba lagi nanti.',
       error: 'Service Unavailable'
     });
   }
@@ -46,287 +91,380 @@ const handleError = (error, res, operation) => {
   if (error.code === 'ETIMEDOUT') {
     return res.status(408).json({
       success: false,
-      message: 'Request timeout. Coba lagi.',
-      error: 'Timeout'
+      message: 'Request timeout. Silakan coba lagi.',
+      error: 'Request Timeout'
     });
   }
   
   return res.status(500).json({
     success: false,
-    message: `Gagal ${operation}`,
-    error: 'Internal Error'
+    message: `Gagal ${operation}. Silakan coba lagi.`,
+    error: error.message
   });
 };
 
-// Main handler function
-module.exports = async (req, res) => {
-  // CORS headers for mobile browsers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+// Cache helper functions
+const getCacheKey = (endpoint, params = {}) => {
+  return `${endpoint}_${JSON.stringify(params)}`;
+};
 
-  const { pathname, query } = new URL(req.url, `http://${req.headers.host}`);
-  
+const getFromCache = (key) => {
+  return cache.get(key);
+};
+
+const setToCache = (key, data) => {
+  cache.set(key, data);
+  return data;
+};
+
+// =============================================================
+// Rute 1: Mengambil daftar komik terbaru dengan pagination
+// =============================================================
+app.get('/latest', async (req, res) => {
   try {
-    // Route: API Documentation
-    if (pathname === '/api' || pathname === '/api/') {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    
+    if (page < 1 || limit < 1 || limit > 50) {
+      return res.status(400).json({
+        success: false,
+        message: 'Parameter tidak valid. Page harus >= 1, limit antara 1-50.'
+      });
+    }
+    
+    const cacheKey = getCacheKey('latest', { page, limit });
+    const cachedData = getFromCache(cacheKey);
+    
+    if (cachedData) {
+      logger.info('Cache hit for latest comics', { page, limit });
       return res.json({
         success: true,
-        message: 'Komikcast Scraper API v2.0 - Mobile Optimized',
-        endpoints: {
-          '/api/latest': 'Daftar komik terbaru (query: page, limit)',
-          '/api/detail/[endpoint]': 'Detail komik dan chapter',
-          '/api/chapter/[endpoint]': 'Gambar chapter',
-          '/api/search': 'Pencarian (query: q, page)',
-          '/api/genres': 'Daftar genre',
-          '/api/genre/[slug]': 'Komik by genre',
-          '/api/health': 'Status API'
-        },
-        mobile: {
-          optimized: true,
-          cacheTime: '5 minutes',
-          timeout: '25 seconds'
-        }
+        data: cachedData,
+        cached: true
       });
     }
+    
+    const url = `${KOMIKCAST_URL}/?page=${page}`;
+    const { data } = await axios.get(url, axiosOptions);
+    const $ = cheerio.load(data);
+    const comics = [];
 
-    // Route: Health Check
-    if (pathname === '/api/health') {
+    $('div.listupd .utao').each((i, element) => {
+      if (comics.length >= limit) return false;
+      
+      const el = $(element);
+      const title = el.find('.luf a h3').text().trim();
+      const fullUrl = el.find('.imgu a').attr('href');
+      const cover = el.find('.imgu a img').attr('data-src') || el.find('.imgu a img').attr('src');
+      const chapter = el.find('.luf ul li:first-child a').text().trim();
+      const endpoint = fullUrl ? fullUrl.split('/')[4] : null;
+      const rating = el.find('.numscore').text().trim();
+      const type = el.find('.typeflag').text().trim();
+
+      if (title && endpoint) {
+        comics.push({ 
+          title, 
+          chapter, 
+          cover, 
+          endpoint, 
+          rating,
+          type,
+          source: 'komikcast' 
+        });
+      }
+    });
+    
+    const result = {
+      comics,
+      pagination: {
+        currentPage: page,
+        limit,
+        hasNext: comics.length === limit,
+        hasPrev: page > 1
+      }
+    };
+    
+    setToCache(cacheKey, result);
+    
+    res.json({
+      success: true,
+      data: result,
+      cached: false
+    });
+    
+  } catch (error) {
+    handleError(error, req, res, 'mengambil daftar komik terbaru');
+  }
+});
+
+// =================================================================
+// Rute 2: Mengambil detail komik & chapter
+// =================================================================
+app.get('/detail/:endpoint', async (req, res) => {
+  try {
+    const { endpoint } = req.params;
+    
+    if (!endpoint || endpoint.length < 3) {
+      return res.status(400).json({
+        success: false,
+        message: 'Endpoint komik tidak valid.'
+      });
+    }
+    
+    const cacheKey = getCacheKey('detail', { endpoint });
+    const cachedData = getFromCache(cacheKey);
+    
+    if (cachedData) {
+      logger.info('Cache hit for comic detail', { endpoint });
       return res.json({
         success: true,
-        message: 'API Running - Mobile Ready',
-        timestamp: new Date().toISOString(),
-        cache: {
-          size: cache.size,
-          mobile: true
-        }
+        data: cachedData,
+        cached: true
       });
     }
+    
+    const url = `${KOMIKCAST_URL}/komik/${endpoint}/`;
+    const { data } = await axios.get(url, axiosOptions);
+    const $ = cheerio.load(data);
 
-    // Route: Latest Comics
-    if (pathname === '/api/latest') {
-      const page = parseInt(query.page) || 1;
-      const limit = Math.min(parseInt(query.limit) || 15, 30); // Reduced for mobile
-      
-      const cacheKey = `latest_${page}_${limit}`;
-      const cached = getCached(cacheKey);
-      
-      if (cached) {
-        return res.json({ success: true, data: cached, cached: true });
+    const title = $('h1.komik_info-content-body-title').text().trim();
+    const cover = $('.komik_info-content-thumbnail img').attr('src');
+    const synopsis = $('.komik_info-description-sinopsis p').text().trim();
+    const status = $('.komik_info-content-meta span:contains("Status")').parent().text().replace('Status', '').trim();
+    const author = $('.komik_info-content-meta span:contains("Author")').parent().text().replace('Author', '').trim();
+    const genres = [];
+    
+    $('.komik_info-content-genre a').each((i, element) => {
+      genres.push($(element).text().trim());
+    });
+    
+    const chapters = [];
+
+    $('.komik_info-chapters-item').each((i, element) => {
+      const el = $(element);
+      const chapterTitle = el.find('a').text().trim();
+      const chapterUrl = el.find('a').attr('href');
+      const chapterEndpoint = chapterUrl ? chapterUrl.split('/').filter(part => part).pop() : null;
+      const releaseDate = el.find('.chapter-link-time').text().trim();
+
+      if (chapterTitle && chapterEndpoint) {
+        chapters.push({ 
+          chapterTitle, 
+          chapterEndpoint,
+          releaseDate 
+        });
       }
-      
-      const url = `${KOMIKCAST_URL}/?page=${page}`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const comics = [];
-
-      $('div.listupd .utao').each((i, element) => {
-        if (comics.length >= limit) return false;
-        
-        const el = $(element);
-        const title = el.find('.luf a h3').text().trim();
-        const fullUrl = el.find('.imgu a').attr('href');
-        const cover = el.find('.imgu a img').attr('data-src') || el.find('.imgu a img').attr('src');
-        const chapter = el.find('.luf ul li:first-child a').text().trim();
-        const endpoint = fullUrl ? fullUrl.split('/')[4] : null;
-
-        if (title && endpoint) {
-          comics.push({ 
-            title, 
-            chapter, 
-            cover, 
-            endpoint, 
-            source: 'komikcast' 
-          });
-        }
+    });
+    
+    if (!title) {
+      return res.status(404).json({
+        success: false,
+        message: 'Komik tidak ditemukan.'
       });
-      
-      const result = {
-        comics,
-        pagination: {
-          currentPage: page,
-          limit,
-          hasNext: comics.length === limit,
-          hasPrev: page > 1
-        }
-      };
-      
-      setCache(cacheKey, result);
-      return res.json({ success: true, data: result, cached: false });
     }
+    
+    const result = { 
+      title, 
+      cover, 
+      synopsis, 
+      status,
+      author,
+      genres,
+      chapters: chapters.reverse() 
+    };
+    
+    setToCache(cacheKey, result);
+    
+    res.json({
+      success: true,
+      data: result,
+      cached: false
+    });
+    
+  } catch (error) {
+    handleError(error, req, res, 'mengambil detail komik');
+  }
+});
 
-    // Route: Comic Detail
-    if (pathname.startsWith('/api/detail/')) {
-      const endpoint = pathname.split('/api/detail/')[1];
-      
-      if (!endpoint) {
-        return res.status(400).json({
-          success: false,
-          message: 'Endpoint komik diperlukan'
-        });
-      }
-      
-      const cacheKey = `detail_${endpoint}`;
-      const cached = getCached(cacheKey);
-      
-      if (cached) {
-        return res.json({ success: true, data: cached, cached: true });
-      }
-      
-      const url = `${KOMIKCAST_URL}/komik/${endpoint}/`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-
-      const title = $('h1.komik_info-content-body-title').text().trim();
-      const cover = $('.komik_info-content-thumbnail img').attr('src');
-      const synopsis = $('.komik_info-description-sinopsis p').text().trim();
-      
-      const genres = [];
-      $('.komik_info-content-genre a').each((i, element) => {
-        genres.push($(element).text().trim());
+// =================================================================
+// Rute 3: Mengambil gambar chapter
+// =================================================================
+app.get('/chapter/:endpoint', async (req, res) => {
+  try {
+    const { endpoint } = req.params;
+    
+    if (!endpoint || endpoint.length < 5) {
+      return res.status(400).json({
+        success: false,
+        message: 'Endpoint chapter tidak valid.'
       });
-      
-      const chapters = [];
-      $('.komik_info-chapters-item').each((i, element) => {
-        const el = $(element);
-        const chapterTitle = el.find('a').text().trim();
-        const chapterUrl = el.find('a').attr('href');
-        const chapterEndpoint = chapterUrl ? chapterUrl.split('/').filter(part => part).pop() : null;
-
-        if (chapterTitle && chapterEndpoint) {
-          chapters.push({ chapterTitle, chapterEndpoint });
-        }
-      });
-      
-      if (!title) {
-        return res.status(404).json({
-          success: false,
-          message: 'Komik tidak ditemukan'
-        });
-      }
-      
-      const result = { 
-        title, 
-        cover, 
-        synopsis, 
-        genres,
-        chapters: chapters.reverse().slice(0, 50) // Limit for mobile
-      };
-      
-      setCache(cacheKey, result);
-      return res.json({ success: true, data: result, cached: false });
     }
-
-    // Route: Chapter Images
-    if (pathname.startsWith('/api/chapter/')) {
-      const endpoint = pathname.split('/api/chapter/')[1];
-      
-      if (!endpoint) {
-        return res.status(400).json({
-          success: false,
-          message: 'Endpoint chapter diperlukan'
-        });
-      }
-      
-      const cacheKey = `chapter_${endpoint}`;
-      const cached = getCached(cacheKey);
-      
-      if (cached) {
-        return res.json({ success: true, data: cached, cached: true });
-      }
-      
-      const url = `${KOMIKCAST_URL}/chapter/${endpoint}/`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const images = [];
-
-      $('.main-reading-area img').each((i, element) => {
-        const imageUrl = $(element).attr('src') || $(element).attr('data-src');
-        if (imageUrl && !imageUrl.includes('loading')) {
-          images.push(imageUrl.trim());
-        }
+    
+    const cacheKey = getCacheKey('chapter', { endpoint });
+    const cachedData = getFromCache(cacheKey);
+    
+    if (cachedData) {
+      logger.info('Cache hit for chapter images', { endpoint });
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
       });
-
-      if (images.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'Chapter tidak ditemukan'
-        });
-      }
-      
-      const result = { 
-        images,
-        totalPages: images.length,
-        chapterEndpoint: endpoint
-      };
-      
-      setCache(cacheKey, result);
-      return res.json({ success: true, data: result, cached: false });
     }
+    
+    const url = `${KOMIKCAST_URL}/chapter/${endpoint}/`;
+    const { data } = await axios.get(url, axiosOptions);
+    const $ = cheerio.load(data);
+    const images = [];
 
-    // Route: Search
-    if (pathname === '/api/search') {
-      const q = query.q;
-      const page = parseInt(query.page) || 1;
-      
-      if (!q || q.length < 2) {
-        return res.status(400).json({
-          success: false,
-          message: 'Query minimal 2 karakter'
-        });
+    $('.main-reading-area img').each((i, element) => {
+      const imageUrl = $(element).attr('src') || $(element).attr('data-src');
+      if (imageUrl && !imageUrl.includes('loading') && !imageUrl.includes('placeholder')) {
+        images.push(imageUrl.trim());
       }
-      
-      const cacheKey = `search_${q}_${page}`;
-      const cached = getCached(cacheKey);
-      
-      if (cached) {
-        return res.json({ success: true, data: cached, cached: true });
-      }
-      
-      const url = `${KOMIKCAST_URL}/?s=${encodeURIComponent(q)}&page=${page}`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const comics = [];
+    });
 
-      $('div.listupd .utao, .bsx').each((i, element) => {
-        if (comics.length >= 15) return false; // Limit for mobile
-        
-        const el = $(element);
-        const title = el.find('.luf a h3, .tt h2 a, .tt h4 a').text().trim();
-        const fullUrl = el.find('.imgu a, .ts a').attr('href');
-        const cover = el.find('.imgu a img, .ts img').attr('data-src') || el.find('.imgu a img, .ts img').attr('src');
-        const endpoint = fullUrl ? fullUrl.split('/')[4] : null;
-
-        if (title && endpoint) {
-          comics.push({ title, cover, endpoint, source: 'komikcast' });
-        }
+    if (images.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Chapter tidak ditemukan atau tidak memiliki gambar.'
       });
-      
-      const result = {
-        comics,
-        query: q,
-        pagination: { currentPage: page, hasNext: comics.length >= 15 }
-      };
-      
-      setCache(cacheKey, result);
-      return res.json({ success: true, data: result, cached: false });
     }
+    
+    const result = { 
+      images,
+      totalPages: images.length,
+      chapterEndpoint: endpoint
+    };
+    
+    setToCache(cacheKey, result);
+    
+    res.json({
+      success: true,
+      data: result,
+      cached: false
+    });
+    
+  } catch (error) {
+    handleError(error, req, res, 'mengambil gambar chapter');
+  }
+});
 
-    // Route: Genres
-    if (pathname === '/api/genres') {
-      const cached = getCached('genres');
-      
-      if (cached) {
-        return res.json({ success: true, data: cached, cached: true });
+// =================================================================
+// Rute 4: Search komik
+// =================================================================
+app.get('/search', async (req, res) => {
+  try {
+    const query = req.query.q;
+    const page = parseInt(req.query.page) || 1;
+    
+    if (!query || query.length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: 'Query pencarian harus minimal 2 karakter.'
+      });
+    }
+    
+    const cacheKey = getCacheKey('search', { query, page });
+    const cachedData = getFromCache(cacheKey);
+    
+    if (cachedData) {
+      logger.info('Cache hit for search', { query, page });
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
+      });
+    }
+    
+    const url = `${KOMIKCAST_URL}/?s=${encodeURIComponent(query)}&page=${page}`;
+    const { data } = await axios.get(url, axiosOptions);
+    const $ = cheerio.load(data);
+    const comics = [];
+
+    $('div.listupd .utao, .bsx').each((i, element) => {
+      const el = $(element);
+      const title = el.find('.luf a h3, .tt h2 a, .tt h4 a').text().trim();
+      const fullUrl = el.find('.imgu a, .ts a').attr('href');
+      const cover = el.find('.imgu a img, .ts img').attr('data-src') || el.find('.imgu a img, .ts img').attr('src');
+      const chapter = el.find('.luf ul li:first-child a, .epxs').text().trim();
+      const endpoint = fullUrl ? fullUrl.split('/')[4] : null;
+      const rating = el.find('.numscore, .rating .rtg').text().trim();
+
+      if (title && endpoint) {
+        comics.push({ 
+          title, 
+          chapter, 
+          cover, 
+          endpoint, 
+          rating,
+          source: 'komikcast' 
+        });
       }
+    });
+    
+    const result = {
+      comics,
+      query,
+      pagination: {
+        currentPage: page,
+        hasNext: comics.length >= 20,
+        hasPrev: page > 1
+      }
+    };
+    
+    setToCache(cacheKey, result);
+    
+    res.json({
+      success: true,
+      data: result,
+      cached: false
+    });
+    
+  } catch (error) {
+    handleError(error, req, res, 'pencarian komik');
+  }
+});
+
+// =================================================================
+// Rute 5: Daftar genre
+// =================================================================
+app.get('/genres', async (req, res) => {
+  try {
+    const cacheKey = getCacheKey('genres');
+    const cachedData = getFromCache(cacheKey);
+    
+    if (cachedData) {
+      logger.info('Cache hit for genres');
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
+      });
+    }
+    
+    const url = `${KOMIKCAST_URL}/daftar-komik/`;
+    const { data } = await axios.get(url, axiosOptions);
+    const $ = cheerio.load(data);
+    const genres = [];
+
+    $('.genre-list a, .tagcloud a, .wp-tag-cloud a').each((i, element) => {
+      const el = $(element);
+      const name = el.text().trim();
+      const slug = el.attr('href') ? el.attr('href').split('/').filter(part => part).pop() : null;
       
-      // Fallback genres for mobile
-      const genres = [
+      if (name && slug && name.length > 1) {
+        genres.push({ 
+          name, 
+          slug,
+          url: el.attr('href')
+        });
+      }
+    });
+    
+    // Fallback manual genres if scraping fails
+    if (genres.length === 0) {
+      const manualGenres = [
         { name: 'Action', slug: 'action' },
         { name: 'Adventure', slug: 'adventure' },
         { name: 'Comedy', slug: 'comedy' },
@@ -338,68 +476,179 @@ module.exports = async (req, res) => {
         { name: 'Supernatural', slug: 'supernatural' },
         { name: 'Thriller', slug: 'thriller' }
       ];
-      
-      const result = { genres, total: genres.length };
-      setCache('genres', result);
-      return res.json({ success: true, data: result, cached: false });
+      genres.push(...manualGenres);
     }
+    
+    const result = {
+      genres: genres.slice(0, 50), // Limit to 50 genres
+      total: genres.length
+    };
+    
+    setToCache(cacheKey, result);
+    
+    res.json({
+      success: true,
+      data: result,
+      cached: false
+    });
+    
+  } catch (error) {
+    handleError(error, req, res, 'mengambil daftar genre');
+  }
+});
 
-    // Route: Genre Comics
-    if (pathname.startsWith('/api/genre/')) {
-      const slug = pathname.split('/api/genre/')[1];
-      const page = parseInt(query.page) || 1;
-      
-      if (!slug) {
-        return res.status(400).json({
-          success: false,
-          message: 'Genre slug diperlukan'
+// =================================================================
+// Rute 6: Komik berdasarkan genre
+// =================================================================
+app.get('/genre/:slug', async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const page = parseInt(req.query.page) || 1;
+    
+    if (!slug || slug.length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: 'Slug genre tidak valid.'
+      });
+    }
+    
+    const cacheKey = getCacheKey('genre', { slug, page });
+    const cachedData = getFromCache(cacheKey);
+    
+    if (cachedData) {
+      logger.info('Cache hit for genre comics', { slug, page });
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
+      });
+    }
+    
+    const url = `${KOMIKCAST_URL}/genres/${slug}/page/${page}/`;
+    const { data } = await axios.get(url, axiosOptions);
+    const $ = cheerio.load(data);
+    const comics = [];
+
+    $('div.listupd .utao, .bsx').each((i, element) => {
+      const el = $(element);
+      const title = el.find('.luf a h3, .tt h2 a, .tt h4 a').text().trim();
+      const fullUrl = el.find('.imgu a, .ts a').attr('href');
+      const cover = el.find('.imgu a img, .ts img').attr('data-src') || el.find('.imgu a img, .ts img').attr('src');
+      const chapter = el.find('.luf ul li:first-child a, .epxs').text().trim();
+      const endpoint = fullUrl ? fullUrl.split('/')[4] : null;
+      const rating = el.find('.numscore, .rating .rtg').text().trim();
+
+      if (title && endpoint) {
+        comics.push({ 
+          title, 
+          chapter, 
+          cover, 
+          endpoint, 
+          rating,
+          source: 'komikcast' 
         });
       }
-      
-      const cacheKey = `genre_${slug}_${page}`;
-      const cached = getCached(cacheKey);
-      
-      if (cached) {
-        return res.json({ success: true, data: cached, cached: true });
-      }
-      
-      const url = `${KOMIKCAST_URL}/genres/${slug}/page/${page}/`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const comics = [];
-
-      $('div.listupd .utao, .bsx').each((i, element) => {
-        if (comics.length >= 15) return false;
-        
-        const el = $(element);
-        const title = el.find('.luf a h3, .tt h2 a, .tt h4 a').text().trim();
-        const fullUrl = el.find('.imgu a, .ts a').attr('href');
-        const cover = el.find('.imgu a img, .ts img').attr('data-src') || el.find('.imgu a img, .ts img').attr('src');
-        const endpoint = fullUrl ? fullUrl.split('/')[4] : null;
-
-        if (title && endpoint) {
-          comics.push({ title, cover, endpoint, source: 'komikcast' });
-        }
-      });
-      
-      const result = {
-        comics,
-        genre: slug,
-        pagination: { currentPage: page, hasNext: comics.length >= 15 }
-      };
-      
-      setCache(cacheKey, result);
-      return res.json({ success: true, data: result, cached: false });
-    }
-
-    // 404 handler
-    return res.status(404).json({
-      success: false,
-      message: 'Endpoint tidak ditemukan',
-      available: ['/api/latest', '/api/detail/[endpoint]', '/api/chapter/[endpoint]', '/api/search', '/api/genres', '/api/genre/[slug]']
     });
-
+    
+    const result = {
+      comics,
+      genre: slug,
+      pagination: {
+        currentPage: page,
+        hasNext: comics.length >= 20,
+        hasPrev: page > 1
+      }
+    };
+    
+    setToCache(cacheKey, result);
+    
+    res.json({
+      success: true,
+      data: result,
+      cached: false
+    });
+    
   } catch (error) {
-    return handleError(error, res, 'processing request');
+    handleError(error, req, res, 'mengambil komik berdasarkan genre');
   }
-};
+});
+
+// =================================================================
+// Health check endpoint
+// =================================================================
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Komikcast Scraper API is running',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    cache: {
+      keys: cache.keys().length,
+      stats: cache.getStats()
+    }
+  });
+});
+
+// =================================================================
+// API Documentation endpoint
+// =================================================================
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Komikcast Scraper API v2.0',
+    endpoints: {
+      '/latest': 'Daftar komik terbaru (query: page, limit)',
+      '/detail/:endpoint': 'Detail komik dan daftar chapter',
+      '/chapter/:endpoint': 'Gambar-gambar dalam chapter',
+      '/search': 'Pencarian komik (query: q, page)',
+      '/genres': 'Daftar semua genre',
+      '/genre/:slug': 'Komik berdasarkan genre (query: page)',
+      '/health': 'Status kesehatan API'
+    },
+    features: [
+      'Rate limiting (100 req/15min)',
+      'Caching (10 minutes TTL)',
+      'Comprehensive logging',
+      'Error handling',
+      'CORS enabled',
+      'Security headers'
+    ]
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Endpoint tidak ditemukan.',
+    availableEndpoints: ['/latest', '/detail/:endpoint', '/chapter/:endpoint', '/search', '/genres', '/genre/:slug', '/health']
+  });
+});
+
+// Global error handler
+app.use((error, req, res, next) => {
+  logger.error('Unhandled error', {
+    error: error.message,
+    stack: error.stack,
+    url: req.url,
+    method: req.method,
+    ip: req.ip
+  });
+  
+  res.status(500).json({
+    success: false,
+    message: 'Terjadi kesalahan internal server.',
+    error: process.env.NODE_ENV === 'development' ? error.message : 'Internal Server Error'
+  });
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  logger.info(`Komikcast Scraper API v2.0 running on port ${PORT}`, {
+    port: PORT,
+    environment: process.env.NODE_ENV || 'development',
+    features: ['rate-limiting', 'caching', 'logging', 'cors', 'security']
+  });
+});
+
+module.exports = app;
