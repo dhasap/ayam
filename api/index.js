@@ -172,29 +172,25 @@ module.exports = async (req, res) => {
       result = { title, cover, synopsis, genres, chapters: chapters.reverse() };
     }
 
-    // --- [ENDPOINT DIPERBAIKI] Rute: Baca Chapter (Gambar) ---
+    // --- Rute: Baca Chapter (Gambar) ---
     else if (type === 'chapter' && endpoint) {
         const url = `${BASE_URL}/chapter/${endpoint}/`;
         const { data } = await axios.get(url, axiosOptions);
         const $ = cheerio.load(data);
         const images = [];
 
-        // Mengambil gambar dari area baca utama
         $('#chapter_body .main-reading-area img').each((i, el) => {
             const element = $(el);
-            // Prioritaskan 'data-src' untuk lazy loading, fallback ke 'src'
             let src = element.attr('data-src') || element.attr('src');
             
             if (src) {
                 src = src.trim();
-                // Memastikan URL valid dan bukan placeholder
                 if (src && !src.includes('loading') && !src.includes('placeholder')) {
                     images.push(src);
                 }
             }
         });
 
-        // Mengambil informasi navigasi dan judul chapter
         const chapterTitle = $('.chapter_headpost h1').text().trim();
         const prevChapterEndpoint = $('.nextprev a[rel="prev"]').attr('href')?.split('/').filter(Boolean).pop() || null;
         const nextChapterEndpoint = $('.nextprev a[rel="next"]').attr('href')?.split('/').filter(Boolean).pop() || null;
@@ -209,19 +205,22 @@ module.exports = async (req, res) => {
         };
     }
     
-    // --- Rute: Daftar Genre ---
+    // --- [ENDPOINT DIPERBAIKI] Rute: Daftar Genre ---
     else if (type === 'genres') {
-      const url = `${BASE_URL}/daftar-genre/`;
+      // Mengubah URL target ke halaman daftar komik yang berisi filter genre
+      const url = `${BASE_URL}/daftar-komik/`;
       const { data } = await axios.get(url, axiosOptions);
       const $ = cheerio.load(data);
       const genres = [];
 
-      $('.genre-list li').each((i, el) => {
-        const name = $(el).find('a').text().trim();
-        const fullUrl = $(el).find('a').attr('href');
-        const slug = fullUrl?.split('/')[4];
-        if (name && slug) {
-            genres.push({ name, endpoint: slug });
+      // Menggunakan selector baru yang sesuai dengan menu filter
+      $('.komiklist_dropdown-menu.genrez li').each((i, el) => {
+        const name = $(el).find('label').text().trim();
+        // Mengambil endpoint dari atribut 'value' pada input checkbox
+        const endpoint = $(el).find('input').attr('value');
+        
+        if (name && endpoint) {
+            genres.push({ name, endpoint });
         }
       });
       result = { genres };
@@ -243,4 +242,4 @@ module.exports = async (req, res) => {
     return handleError(res, err, `type: ${type}`);
   }
 };
-  
+                        
