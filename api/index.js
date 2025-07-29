@@ -61,15 +61,14 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate'); // Cache di sisi CDN Vercel
+  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
 
-  // Handle pre-flight request
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
 
-  const { type, endpoint, page = 1, q: query } = req.query;
-  const cacheKey = `${type}_${endpoint || query || ''}_${page}`;
+  const { type, endpoint, page = 1 } = req.query;
+  const cacheKey = JSON.stringify(req.query);
 
   try {
     const cachedData = getCached(cacheKey);
@@ -79,7 +78,7 @@ module.exports = async (req, res) => {
 
     let result;
 
-    // --- Rute: Daftar Komik Terbaru (latest) ---
+    // --- Rute: Daftar Komik Terbaru (latest) dari Halaman Utama ---
     if (type === 'latest') {
       const url = `${BASE_URL}/?page=${page}`;
       const { data } = await axios.get(url, axiosOptions);
@@ -100,25 +99,50 @@ module.exports = async (req, res) => {
       result = { comics };
     }
 
-    // --- Rute: Komik Populer/Hot ---
-    else if (type === 'popular') {
-      const url = BASE_URL; // Komik hot ada di halaman utama
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const comics = [];
-      
-      $('.list-update_item-wrapper.hot .list-update_item').each((i, el) => {
-        const title = $(el).find('.list-update_item-info h3 a').text().trim();
-        const fullUrl = $(el).find('a').attr('href');
-        const cover = $(el).find('.list-update_item-image img').attr('src');
-        const chapter = $(el).find('.list-update_item-info .chapter a').text().trim();
-        const slug = fullUrl?.split('/')[4];
+    // --- Rute: Browse/Filter Komik ---
+    else if (type === 'browse') {
+        const { status, orderby = 'popular', comic_type, genre, q } = req.query;
         
-        if(title && slug) {
-            comics.push({ title, chapter, cover, endpoint: slug });
+        const params = new URLSearchParams();
+        if (status) params.append('status', status);
+        if (orderby) params.append('orderby', orderby);
+        if (comic_type) params.append('type', comic_type);
+        if (q) params.append('s', q);
+        
+        let genreQuery = '';
+        if (genre) {
+            const genreArr = genre.split(',');
+            genreArr.forEach(g => {
+                genreQuery += `&genre[]=${g.trim()}`;
+            });
         }
-      });
-      result = { comics };
+
+        const url = `${BASE_URL}/daftar-komik/page/${page}/?${params.toString()}${genreQuery}`;
+        const { data } = await axios.get(url, axiosOptions);
+        const $ = cheerio.load(data);
+        const comics = [];
+
+        $('.list-update_item').each((i, el) => {
+            const title = $(el).find('h3.title').text().trim();
+            const fullUrl = $(el).find('a').attr('href');
+            const cover = $(el).find('img').attr('src');
+            const comicType = $(el).find('span.type').text().trim();
+            const chapter = $(el).find('.chapter').text().trim();
+            const rating = $(el).find('.numscore').text().trim();
+            const endpoint = fullUrl?.split('/')[4];
+
+            if (title && endpoint) {
+                comics.push({ title, endpoint, cover, type: comicType, chapter, rating });
+            }
+        });
+        
+        const lastPage = $('.pagination a.page-numbers').not('.next').last().text();
+        const pagination = {
+            currentPage: parseInt(page, 10),
+            lastPage: lastPage ? parseInt(lastPage, 10) : parseInt(page, 10)
+        };
+
+        result = { comics, pagination };
     }
 
     // --- Rute: Detail Komik ---
@@ -132,7 +156,10 @@ module.exports = async (req, res) => {
       const synopsis = $('.komik_info-description-sinopsis p').text().trim();
       const genres = [];
       $('.komik_info-content-genre a').each((i, el) => {
-        genres.push($(el).text().trim());
+        genres.push({
+            name: $(el).text().trim(),
+            endpoint: $(el).attr('href')?.split('/')[4]
+        });
       });
       const chapters = [];
 
@@ -145,40 +172,43 @@ module.exports = async (req, res) => {
       result = { title, cover, synopsis, genres, chapters: chapters.reverse() };
     }
 
-    // --- Rute: Baca Chapter (Gambar) ---
+    // --- [ENDPOINT DIPERBAIKI] Rute: Baca Chapter (Gambar) ---
     else if (type === 'chapter' && endpoint) {
-      const url = `${BASE_URL}/chapter/${endpoint}/`;
-      const { data } = await axios.get(url, axiosOptions);
-      const $ = cheerio.load(data);
-      const images = [];
-
-      $('.main-reading-area img').each((i, el) => {
-        const src = $(el).attr('src')?.trim();
-        if (src && !src.includes('loading')) images.push(src);
-      });
-      result = { images };
-    }
-
-    // --- Rute: Pencarian Komik ---
-    else if (type === 'search' && query) {
-        const url = `${BASE_URL}/page/${page}/?s=${encodeURIComponent(query)}`;
+        const url = `${BASE_URL}/chapter/${endpoint}/`;
         const { data } = await axios.get(url, axiosOptions);
         const $ = cheerio.load(data);
-        const comics = [];
+        const images = [];
 
-        $('div.listupd .bsx').each((i, el) => {
-            const title = $(el).find('.tt h2').text().trim();
-            const fullUrl = $(el).find('a').attr('href');
-            const cover = $(el).find('.limit img').attr('data-src') || $(el).find('.limit img').attr('src');
-            const slug = fullUrl?.split('/')[4];
+        // Mengambil gambar dari area baca utama
+        $('#chapter_body .main-reading-area img').each((i, el) => {
+            const element = $(el);
+            // Prioritaskan 'data-src' untuk lazy loading, fallback ke 'src'
+            let src = element.attr('data-src') || element.attr('src');
             
-            if (title && slug) {
-                comics.push({ title, cover, endpoint: slug });
+            if (src) {
+                src = src.trim();
+                // Memastikan URL valid dan bukan placeholder
+                if (src && !src.includes('loading') && !src.includes('placeholder')) {
+                    images.push(src);
+                }
             }
         });
-        result = { comics, query };
-    }
 
+        // Mengambil informasi navigasi dan judul chapter
+        const chapterTitle = $('.chapter_headpost h1').text().trim();
+        const prevChapterEndpoint = $('.nextprev a[rel="prev"]').attr('href')?.split('/').filter(Boolean).pop() || null;
+        const nextChapterEndpoint = $('.nextprev a[rel="next"]').attr('href')?.split('/').filter(Boolean).pop() || null;
+
+        result = { 
+            title: chapterTitle,
+            images, 
+            navigation: {
+                prev: prevChapterEndpoint,
+                next: nextChapterEndpoint
+            }
+        };
+    }
+    
     // --- Rute: Daftar Genre ---
     else if (type === 'genres') {
       const url = `${BASE_URL}/daftar-genre/`;
@@ -202,11 +232,10 @@ module.exports = async (req, res) => {
       return res.status(400).json({ 
         success: false, 
         message: 'Invalid or missing `type` parameter.',
-        availableTypes: ['latest', 'popular', 'detail', 'chapter', 'search', 'genres']
+        availableTypes: ['latest', 'browse', 'detail', 'chapter', 'genres']
       });
     }
     
-    // Simpan ke cache dan kirim respon
     setCache(cacheKey, result);
     return res.status(200).json({ success: true, cached: false, data: result });
 
@@ -214,3 +243,4 @@ module.exports = async (req, res) => {
     return handleError(res, err, `type: ${type}`);
   }
 };
+  
