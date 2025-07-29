@@ -68,51 +68,45 @@ module.exports = async (req, res) => {
         result = { comics };
     }
     
+    // --- [ENDPOINT DIPERBARUI] Rute: Browse & Search Digabung ---
     else if (type === 'browse') {
-        const params = new URLSearchParams(req.query);
-        params.delete('type'); // Hapus 'type' karena sudah digunakan
-        const url = `${BASE_URL}/daftar-komik/page/${page}/?${params.toString()}`;
+        let url;
+        // Cek apakah ada parameter 'q' untuk menentukan ini pencarian atau bukan
+        if (query) {
+            // Jika ada, gunakan URL pencarian standar WordPress
+            url = `${BASE_URL}/page/${page}/?s=${encodeURIComponent(query)}`;
+        } else {
+            // Jika tidak, gunakan URL browse/filter seperti biasa
+            const params = new URLSearchParams(req.query);
+            params.delete('type');
+            params.delete('q');
+            params.delete('page');
+            url = `${BASE_URL}/daftar-komik/page/${page}/?${params.toString()}`;
+        }
+
         const { data } = await axios.get(url, axiosOptions);
         const $ = cheerio.load(data);
         const comics = [];
+
+        // Selector ini berfungsi untuk halaman browse dan halaman search
         $('.list-update_item').each((i, el) => {
             const title = $(el).find('h3.title').text().trim();
             const fullUrl = $(el).find('a').attr('href');
-            const cover = $(el).find('img').attr('src');
+            // Selector cover dibuat lebih kuat untuk menangani kedua halaman
+            const cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
             const comicType = $(el).find('span.type').text().trim();
             const chapter = $(el).find('.chapter').text().trim();
             const rating = $(el).find('.numscore').text().trim();
             const endpoint = fullUrl?.split('/')[4];
-            if (title && endpoint) comics.push({ title, endpoint, cover, type: comicType, chapter, rating });
+
+            if (title && endpoint) {
+                comics.push({ title, endpoint, cover, type: comicType, chapter, rating });
+            }
         });
+        
         const lastPage = $('.pagination a.page-numbers').not('.next').last().text();
         const pagination = { currentPage: parseInt(page, 10), lastPage: lastPage ? parseInt(lastPage, 10) : parseInt(page, 10) };
         result = { comics, pagination };
-    }
-
-    // --- [ENDPOINT BARU] Rute: Live Search Komikcast ---
-    else if (type === 'search_suggest' && query) {
-        const url = `${BASE_URL}/wp-admin/admin-ajax.php`;
-        const formData = new URLSearchParams();
-        formData.append('action', 'live_search');
-        formData.append('keyword', query);
-
-        const { data } = await axios.post(url, formData, {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-        });
-
-        // Data sudah dalam format JSON, tapi thumbnailnya masih HTML
-        const comics = data.map(item => {
-            const $ = cheerio.load(item.thumbnail);
-            const cover = $('img').attr('src');
-            const endpoint = item.permalink?.split('/').filter(Boolean).pop();
-            return {
-                title: item.title,
-                endpoint: endpoint,
-                cover: cover
-            };
-        });
-        result = { comics };
     }
 
     else if (type === 'detail' && endpoint) {
@@ -159,7 +153,7 @@ module.exports = async (req, res) => {
         return res.status(400).json({ 
             success: false, 
             message: 'Invalid or missing parameters.',
-            availableTypes: ['latest', 'browse', 'search_suggest', 'detail', 'chapter', 'genres']
+            availableTypes: ['latest', 'browse', 'detail', 'chapter', 'genres']
         });
     }
     
