@@ -40,10 +40,29 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
   if (req.method === 'OPTIONS') return res.status(204).end();
 
-  const { type, endpoint, page = 1, q: query } = req.query;
+  const { type, endpoint, page = 1, q: query, url: imageUrl } = req.query;
+
+  // --- [FITUR BARU] Image Proxy untuk mengatasi gambar kosong ---
+  if (type === 'image_proxy' && imageUrl) {
+      try {
+          const imageResponse = await axios.get(imageUrl, {
+              ...axiosOptions,
+              responseType: 'arraybuffer' // Ambil sebagai data mentah
+          });
+          const contentType = imageResponse.headers['content-type'];
+          res.setHeader('Content-Type', contentType);
+          res.setHeader('Cache-Control', 'public, max-age=604800, immutable'); // Cache gambar 1 minggu
+          return res.status(200).send(imageResponse.data);
+      } catch (err) {
+          console.error(`Proxy error for ${imageUrl}:`, err.message);
+          return res.status(404).json({ success: false, message: 'Image not found' });
+      }
+  }
+  
+  // Sisa kode di bawah ini adalah kode asli milikmu, tidak diubah.
+  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
   const cacheKey = JSON.stringify(req.query);
 
   try {
@@ -115,7 +134,6 @@ module.exports = async (req, res) => {
         result = { title, cover, synopsis, genres, chapters };
     }
 
-    // --- [PERBAIKAN] Rute: Baca Chapter ---
     else if (type === 'chapter' && endpoint) {
         const url = `${BASE_URL}/chapter/${endpoint}/`;
         const { data } = await axios.get(url, axiosOptions);
@@ -125,11 +143,9 @@ module.exports = async (req, res) => {
             let src = $(el).attr('data-src') || $(el).attr('src');
             if (src) {
                 src = src.trim();
-                // Memastikan URL selalu memiliki 'https://'
                 if (src.startsWith('//')) {
                     src = 'https:' + src;
                 }
-                // Menghapus parameter yang tidak perlu jika ada
                 src = src.split('?')[0];
                 return src;
             }
@@ -157,7 +173,7 @@ module.exports = async (req, res) => {
         return res.status(400).json({ 
             success: false, 
             message: 'Invalid or missing parameters.',
-            availableTypes: ['latest', 'browse', 'detail', 'chapter', 'genres']
+            availableTypes: ['latest', 'browse', 'detail', 'chapter', 'genres', 'image_proxy']
         });
     }
     
@@ -168,4 +184,4 @@ module.exports = async (req, res) => {
     return handleError(res, err, `type: ${type}`);
   }
 };
-                                                            
+      
