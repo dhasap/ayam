@@ -3,7 +3,7 @@ const cheerio = require('cheerio');
 
 // KONSTANTA UTAMA
 const BASE_URL = 'https://komikcast.li';
-const CACHE_TTL = 5 * 60 * 1000; // Cache 5 menit
+const CACHE_TTL = 5 * 60 * 1000;
 
 // KONFIGURASI AXIOS
 const axiosOptions = {
@@ -68,42 +68,30 @@ module.exports = async (req, res) => {
         result = { comics };
     }
     
-    // --- [ENDPOINT DIPERBARUI] Rute: Browse & Search Digabung ---
     else if (type === 'browse') {
         let url;
-        // Cek apakah ada parameter 'q' untuk menentukan ini pencarian atau bukan
         if (query) {
-            // Jika ada, gunakan URL pencarian standar WordPress
             url = `${BASE_URL}/page/${page}/?s=${encodeURIComponent(query)}`;
         } else {
-            // Jika tidak, gunakan URL browse/filter seperti biasa
             const params = new URLSearchParams(req.query);
             params.delete('type');
             params.delete('q');
             params.delete('page');
             url = `${BASE_URL}/daftar-komik/page/${page}/?${params.toString()}`;
         }
-
         const { data } = await axios.get(url, axiosOptions);
         const $ = cheerio.load(data);
         const comics = [];
-
-        // Selector ini berfungsi untuk halaman browse dan halaman search
         $('.list-update_item').each((i, el) => {
             const title = $(el).find('h3.title').text().trim();
             const fullUrl = $(el).find('a').attr('href');
-            // Selector cover dibuat lebih kuat untuk menangani kedua halaman
             const cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
             const comicType = $(el).find('span.type').text().trim();
             const chapter = $(el).find('.chapter').text().trim();
             const rating = $(el).find('.numscore').text().trim();
             const endpoint = fullUrl?.split('/')[4];
-
-            if (title && endpoint) {
-                comics.push({ title, endpoint, cover, type: comicType, chapter, rating });
-            }
+            if (title && endpoint) comics.push({ title, endpoint, cover, type: comicType, chapter, rating });
         });
-        
         const lastPage = $('.pagination a.page-numbers').not('.next').last().text();
         const pagination = { currentPage: parseInt(page, 10), lastPage: lastPage ? parseInt(lastPage, 10) : parseInt(page, 10) };
         result = { comics, pagination };
@@ -127,11 +115,27 @@ module.exports = async (req, res) => {
         result = { title, cover, synopsis, genres, chapters };
     }
 
+    // --- [PERBAIKAN] Rute: Baca Chapter ---
     else if (type === 'chapter' && endpoint) {
         const url = `${BASE_URL}/chapter/${endpoint}/`;
         const { data } = await axios.get(url, axiosOptions);
         const $ = cheerio.load(data);
-        const images = $('#chapter_body .main-reading-area img').map((i, el) => $(el).attr('data-src') || $(el).attr('src')).get().filter(src => src && !src.includes('loading'));
+        
+        const images = $('#chapter_body .main-reading-area img').map((i, el) => {
+            let src = $(el).attr('data-src') || $(el).attr('src');
+            if (src) {
+                src = src.trim();
+                // Memastikan URL selalu memiliki 'https://'
+                if (src.startsWith('//')) {
+                    src = 'https:' + src;
+                }
+                // Menghapus parameter yang tidak perlu jika ada
+                src = src.split('?')[0];
+                return src;
+            }
+            return null;
+        }).get().filter(src => src && !src.includes('loading'));
+
         const chapterTitle = $('.chapter_headpost h1').text().trim();
         const prev = $('.nextprev a[rel="prev"]').attr('href')?.split('/').filter(Boolean).pop() || null;
         const next = $('.nextprev a[rel="next"]').attr('href')?.split('/').filter(Boolean).pop() || null;
@@ -164,4 +168,4 @@ module.exports = async (req, res) => {
     return handleError(res, err, `type: ${type}`);
   }
 };
-          
+                                                            
