@@ -9,7 +9,7 @@ const CACHE_TTL = 5 * 60 * 1000;
 const axiosOptions = {
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Referer': BASE_URL + '/'
+    'Referer': 'https://komikcast.li' + '/'
   },
   timeout: 25000
 };
